@@ -32,7 +32,8 @@ type Define struct {
 
 type TypeDef struct {
   Name string `json:"name"`
-  Type string `json:"type"`
+  //Type string `json:"type"`
+  Type Type `json:"type"`
 }
 
 type Struct struct {
@@ -45,17 +46,93 @@ type Struct struct {
 type Template struct {
   Name string `json:"name"`
   Args []string `json:"args"`
-  Type Type `json:"type,omitempty"`
-  Struct Struct `json:"struct,omitempty"`
+  Type *Type `json:"type,omitempty"`
+  Struct *Struct `json:"struct,omitempty"`
 }
 
 type Output struct {
   Includes []string `json:"includes"`
   Defines []Define `json:"defines"`
-  TypeDefs []TypeDef `json:"typedefs"`
   Templates []Template `json:"templates"`
+  TypeDefs []TypeDef `json:"typedefs"`
   Structs []Struct `json:"structs"`
   Syscalls []Syscall `json:"syscalls"`
+}
+
+func flattenType(t *ast.Type, full bool) string {
+  var _t string
+  if t.Ident != "" {
+    _t = t.Ident
+  } else if t.String != "" {
+    _t = t.String
+  } else {
+    _t = fmt.Sprintf("%d", uint64(t.Value))
+  }
+
+  for _, co := range t.Colon {
+    _t += ":" + typeToString(dumpType(co))
+  }
+
+  if !full {
+    return _t
+  }
+
+  if len(t.Args) > 0 {
+    _t += "["
+    for i, arg := range t.Args {
+        _t += flattenType(arg, true)
+      if i < len(t.Args)-1 {
+        _t += ", "
+      }
+    }
+    _t += "]"
+  }
+
+  return _t
+}
+
+func dumpType(t *ast.Type) Type {
+  typ := Type{}
+
+  typ.Name = flattenType(t, false)
+  if len(t.Args) > 0 {
+    for _, arg := range t.Args {
+      _arg := flattenType(arg, true)
+      typ.Args = append(typ.Args, _arg)
+    }
+  }
+  return typ
+}
+
+func typeNameSimple(t Type) string {
+  if t.Name == "" && len(t.Args) == 1 {
+    return t.Args[0]
+  }
+  if len(t.Args) == 0 {
+    return t.Name
+  }
+  return "<unknown>"
+}
+
+func typeToString(t Type) string {
+  if len(t.Args) == 0 {
+    return t.Name
+  }
+  if t.Name == "" {
+    return t.Args[0]
+  }
+
+  return fmt.Sprintf("%s[%s]", t.Name, strings.Join(t.Args, ", "))
+
+  /*ret := t.Name + "["
+  for i, arg := range t.Args {
+    ret += typeToString(arg)
+    if i < len(t.Args) {
+      ret += ", "
+    }
+  }
+  ret += "]"
+  return ret*/
 }
 
 func dumpStruct(s *ast.Struct) Struct {
@@ -65,38 +142,14 @@ func dumpStruct(s *ast.Struct) Struct {
 
   if len(s.Attrs) > 0 {
     for _, a := range s.Attrs {
-      attr := Type{}
-      attr.Name = a.Ident
-      if len(a.Args) > 0 {
-        for _, aa := range a.Args {
-          if aa.Ident != "" {
-            attr.Args = append(attr.Args, aa.Ident)
-          } else if aa.String != "" {
-            attr.Args = append(attr.Args, aa.String)
-          } else {
-            attr.Args = append(attr.Args, fmt.Sprintf("%d", uint64(aa.Value)))
-          }
-        }
-      }
+      attr := dumpType(a)
       st.Attrs = append(st.Attrs, attr)
     }
   }
   for _, f := range s.Fields {
     field := Arg{}
     field.Name = f.Name.Name
-    field.Type.Name = f.Type.Ident
-
-    if len(f.Type.Args) > 0 {
-      for _, a := range f.Type.Args {
-        if a.Ident != "" {
-          field.Type.Args = append(field.Type.Args, a.Ident)
-        } else if a.String != "" {
-          field.Type.Args = append(field.Type.Args, a.String)
-        } else {
-          field.Type.Args = append(field.Type.Args, fmt.Sprintf("%d", uint64(a.Value)))
-        }
-      }
-    }
+    field.Type = dumpType(f.Type)
     st.Fields = append(st.Fields, field)
   }
 
@@ -134,12 +187,35 @@ func main() {
     } else if t, ok := n.(*ast.TypeDef); ok {
       if len(t.Args) > 0 {
         template := Template{}
+/*
+type Template struct {
+  Name string `json:"name"`
+  Args []string `json:"args"`
+  Type Type `json:"type,omitempty"`
+  Struct Struct `json:"struct,omitempty"`
+}
+*/
+        //fmt.Printf("[template] %+v\n", t)
+        //fmt.Printf("[template] name: %s\n", t.Name.Name)
+        template.Name = t.Name.Name
+        for _, ident := range t.Args {
+          template.Args = append(template.Args, ident.Name)
+        }
+        if t.Type != nil {
+          _type := dumpType(t.Type)
+          template.Type = &_type
+        } else if t.Struct != nil {
+          _struct := dumpStruct(t.Struct)
+          template.Struct = &_struct
+        }
 
+        output.Templates = append(output.Templates, template)
       } else {
         typedef := TypeDef{}
-
+        typedef.Name = t.Name.Name
+        typedef.Type = dumpType(t.Type)
+        output.TypeDefs = append(output.TypeDefs, typedef)
       }
-
     } else if s, ok := n.(*ast.Struct); ok {
       st := dumpStruct(s)
       output.Structs = append(output.Structs, st)
@@ -155,20 +231,14 @@ func main() {
       s.Name = c.CallName
 
       if c.Ret != nil {
-        s.Ret = &c.Ret.Ident
+        ret := flattenType(c.Ret, true)
+        s.Ret = &ret
       }
 
       for _, a := range c.Args {
-        //fmt.Printf("%s %+v", a.Name.Name, a.Type)
         arg := Arg{}
         arg.Name = a.Name.Name
-        arg.Type.Name = a.Type.Ident
-
-        if len(a.Type.Args) > 0 {
-          for _, aa := range a.Type.Args {
-            arg.Type.Args = append(arg.Type.Args, aa.Ident)
-          }
-        }
+        arg.Type = dumpType(a.Type)
         s.Args = append(s.Args, arg)
       }
       output.Syscalls = append(output.Syscalls, s)
